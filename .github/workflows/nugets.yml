@@ -1,0 +1,95 @@
+name: nugets
+
+# Publishes the BeaconTower packages a customer's provider restores from.
+#
+# They are private on GitHub Packages, and GitHub refuses anonymous NuGet even
+# for public packages, so a customer has no feed to restore from. This vendors
+# the closure and publishes it as a release asset, which IS anonymously
+# downloadable. btk3s 'provider fetch' unpacks it into a project's packages/.
+#
+# The built-in GITHUB_TOKEN is enough: each package grants this repository read
+# access. There is no PAT to rotate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      providersdk:
+        description: BeaconTower.ProviderSdk version - names the release
+        required: true
+      telemetry:
+        description: BeaconTower.Telemetry version
+        required: true
+      healthchecks:
+        description: BeaconTower.HealthChecks version
+        required: true
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # Only the three roots are named. ProviderSdk's own dependencies are
+      # walked out of the .nuspec, so a closure that misses one fails the gate
+      # below rather than reaching a customer.
+      - name: Vendor the closure
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          printf 'providersdk     %s\n' "${{ inputs.providersdk }}"  > upstream.lock
+          printf 'telemetry       %s\n' "${{ inputs.telemetry }}"   >> upstream.lock
+          printf 'healthchecks    %s\n' "${{ inputs.healthchecks }}" >> upstream.lock
+          python3 nugets/nuget.py vendor vendored upstream.lock
+
+      # The gate that matters: restore the three roots with NO credential. The
+      # vendored nuget.config also lists the private feed, so unsetting the
+      # token is what proves the folder stands on its own - with a credential
+      # present a missing package would fall through and pass here, then fail
+      # for a customer who has none.
+      - name: Credential-free restore
+        run: |
+          set -eu
+          mkdir -p gate && cp -r vendored/packages gate/packages
+          cp vendored/nuget.config gate/nuget.config
+          cat > gate/V.csproj <<XML
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="BeaconTower.ProviderSdk" Version="${{ inputs.providersdk }}" />
+              <PackageReference Include="BeaconTower.Telemetry" Version="${{ inputs.telemetry }}" />
+              <PackageReference Include="BeaconTower.HealthChecks" Version="${{ inputs.healthchecks }}" />
+            </ItemGroup>
+          </Project>
+          XML
+          cd gate
+          env -u GITHUB_TOKEN -u NUGET_TOKEN \
+            dotnet restore --configfile ./nuget.config --no-http-cache
+
+      - name: Pack
+        run: |
+          set -eu
+          cd vendored/packages
+          zip -q -r "../../beacontower-nugets-v${{ inputs.providersdk }}.zip" .
+          cd ../..
+          unzip -l "beacontower-nugets-v${{ inputs.providersdk }}.zip" | tail -3
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nugets-v${{ inputs.providersdk }}
+          name: BeaconTower NuGets ${{ inputs.providersdk }}
+          body: |
+            The BeaconTower packages a provider restores from, vendored so no
+            credential is needed. Unpack into your project's `packages/`, or let
+            btk3s do it: `btk3s provider fetch <name>`.
+
+            ProviderSdk ${{ inputs.providersdk }}, Telemetry ${{ inputs.telemetry }}, HealthChecks ${{ inputs.healthchecks }}.
+          files: beacontower-nugets-v${{ inputs.providersdk }}.zip
+          fail_on_unmatched_files: true
