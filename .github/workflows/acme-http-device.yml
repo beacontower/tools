@@ -1,0 +1,56 @@
+name: acme-http-device
+
+on:
+  push:
+    tags: ["acme-http-device-v*"]
+    branches: [main]
+    paths: ["acme-http/device/**", ".github/workflows/acme-http-device.yml"]
+  pull_request:
+    paths: ["acme-http/device/**", ".github/workflows/acme-http-device.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: acme-http/device
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: acme-http/device/go.mod
+
+      - run: go vet ./...
+      - run: gofmt -l . | tee /dev/stderr | (! read)
+
+      # One static binary per platform, named the way the other tools in this
+      # repo are, so the download URL in the docs is predictable.
+      - name: Build
+        run: |
+          set -eu
+          mkdir -p dist
+          for target in linux-x64:linux:amd64 linux-arm64:linux:arm64 \
+                        osx-x64:darwin:amd64 osx-arm64:darwin:arm64 win-x64:windows:amd64; do
+            name=${target%%:*}; rest=${target#*:}
+            goos=${rest%%:*}; goarch=${rest#*:}
+            out="dist/acme-http-device-$name"
+            [ "$goos" = windows ] && out="$out.exe"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "-s -w" -o "$out" .
+          done
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acme-http-device
+          path: acme-http/device/dist/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/acme-http-device-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: acme-http/device/dist/*
+          fail_on_unmatched_files: true
